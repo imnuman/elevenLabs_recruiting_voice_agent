@@ -1,0 +1,36 @@
+{
+  "name": "elevenlabs-recruiting-voice-agent",
+  "version": "1.0.0",
+  "description": "AI-powered voice agent for automated recruiting outreach calls",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "jest"
+  },
+  "keywords": [
+    "elevenlabs",
+    "twilio",
+    "voice-agent",
+    "recruiting",
+    "ai"
+  ],
+  "author": "Numan",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^8.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "googleapis": "^166.0.0",
+    "twilio": "^5.10.6",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "jest": "^30.2.0",
+    "nodemon": "^3.1.11"
+  }
+}
