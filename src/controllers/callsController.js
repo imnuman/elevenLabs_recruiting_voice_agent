@@ -1,38 +1,29 @@
 const twilioService = require('../services/twilio');
-const googleSheets = require('../services/googleSheets');
-const config = require('../config');
-
-// In-memory call state (replace with database in production)
-const callState = {
-  queue: [],
-  activeCalls: new Map(),
-  isRunning: false,
-};
+const callQueue = require('../services/callQueue');
 
 /**
  * Start the calling queue
  */
 async function startQueue(req, res, next) {
   try {
-    if (callState.isRunning) {
-      return res.json({ success: false, message: 'Queue is already running' });
+    const { sheetName } = req.body;
+
+    // Load candidates from sheet
+    const count = await callQueue.loadCandidates(sheetName);
+
+    if (count === 0) {
+      return res.json({
+        success: false,
+        message: 'No pending candidates found',
+      });
     }
 
-    // Load pending candidates
-    const candidates = await googleSheets.getPendingCandidates();
-    callState.queue = candidates.filter(c =>
-      c.attempts < config.compliance.maxRetryAttempts
-    );
-    callState.isRunning = true;
-
+    // Start the queue
+    const result = await callQueue.start();
     res.json({
-      success: true,
-      message: 'Calling queue started',
-      queueSize: callState.queue.length,
+      ...result,
+      candidatesLoaded: count,
     });
-
-    // Start processing queue in background
-    processQueue();
   } catch (error) {
     next(error);
   }
@@ -43,12 +34,32 @@ async function startQueue(req, res, next) {
  */
 async function stopQueue(req, res, next) {
   try {
-    callState.isRunning = false;
-    res.json({
-      success: true,
-      message: 'Calling queue stopped',
-      remainingInQueue: callState.queue.length,
-    });
+    const result = callQueue.stop();
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Pause the calling queue
+ */
+async function pauseQueue(req, res, next) {
+  try {
+    const result = callQueue.pause();
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Resume the calling queue
+ */
+async function resumeQueue(req, res, next) {
+  try {
+    const result = callQueue.resume();
+    res.json(result);
   } catch (error) {
     next(error);
   }
@@ -59,12 +70,8 @@ async function stopQueue(req, res, next) {
  */
 async function getQueueStatus(req, res, next) {
   try {
-    res.json({
-      isRunning: callState.isRunning,
-      queueSize: callState.queue.length,
-      activeCalls: callState.activeCalls.size,
-      activeCallDetails: Array.from(callState.activeCalls.values()),
-    });
+    const status = callQueue.getStatus();
+    res.json(status);
   } catch (error) {
     next(error);
   }
@@ -77,9 +84,10 @@ async function getCallDetails(req, res, next) {
   try {
     const { id } = req.params;
 
-    // Check in-memory first
-    if (callState.activeCalls.has(id)) {
-      return res.json(callState.activeCalls.get(id));
+    // Check in queue service first
+    const callData = callQueue.getCall(id);
+    if (callData) {
+      return res.json(callData);
     }
 
     // Fetch from Twilio
@@ -91,17 +99,32 @@ async function getCallDetails(req, res, next) {
 }
 
 /**
+ * Get completed calls history
+ */
+async function getCompletedCalls(req, res, next) {
+  try {
+    const calls = callQueue.getCompletedCalls();
+    res.json({
+      count: calls.length,
+      calls,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
  * Make a single test call
  */
 async function makeTestCall(req, res, next) {
   try {
-    const { phoneNumber, candidateName } = req.body;
+    const { phoneNumber, candidateName, role } = req.body;
 
     if (!phoneNumber) {
       return res.status(400).json({ error: 'phoneNumber is required' });
     }
 
-    const baseUrl = req.body.baseUrl || `${req.protocol}://${req.get('host')}`;
+    const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
     const webhookUrl = `${baseUrl}/api/webhooks/twilio/voice`;
     const statusCallbackUrl = `${baseUrl}/api/webhooks/twilio/status`;
 
@@ -110,15 +133,20 @@ async function makeTestCall(req, res, next) {
       detectVoicemail: true,
     });
 
-    callState.activeCalls.set(call.callSid, {
+    // Add to active calls tracking
+    const callData = {
       ...call,
-      candidateName: candidateName || 'Test',
+      candidate: {
+        name: candidateName || 'Test Candidate',
+        phone: phoneNumber,
+        role: role || 'Test Position',
+      },
       startedAt: new Date().toISOString(),
-    });
+    };
 
     res.json({
       success: true,
-      call,
+      call: callData,
     });
   } catch (error) {
     next(error);
@@ -129,7 +157,7 @@ async function makeTestCall(req, res, next) {
  * Twilio voice webhook - returns TwiML
  */
 async function twilioVoiceWebhook(req, res) {
-  const { CallSid, AnsweredBy } = req.body;
+  const { CallSid, AnsweredBy, To } = req.body;
 
   // Check if voicemail
   if (AnsweredBy && AnsweredBy.includes('machine')) {
@@ -138,12 +166,17 @@ async function twilioVoiceWebhook(req, res) {
     return res.send(twilioService.generateVoicemailTwiML(voicemailMessage));
   }
 
-  // Connect to ElevenLabs WebSocket
-  const callData = callState.activeCalls.get(CallSid) || {};
-  const wsUrl = `wss://${req.get('host')}/api/media-stream`;
+  // Get call data for candidate context
+  const callData = callQueue.getCall(CallSid);
+  const candidateName = callData?.candidate?.name || 'there';
+
+  // Build WebSocket URL with candidate context
+  const wsHost = req.get('host');
+  const wsProtocol = req.protocol === 'https' ? 'wss' : 'ws';
+  const wsUrl = `${wsProtocol}://${wsHost}/api/media-stream?candidateName=${encodeURIComponent(candidateName)}`;
 
   res.type('text/xml');
-  res.send(twilioService.generateStreamTwiML(wsUrl, callData.candidateName || 'Candidate'));
+  res.send(twilioService.generateStreamTwiML(wsUrl, candidateName));
 }
 
 /**
@@ -152,28 +185,11 @@ async function twilioVoiceWebhook(req, res) {
 async function twilioStatusWebhook(req, res) {
   const { CallSid, CallStatus, CallDuration, AnsweredBy } = req.body;
 
-  const callData = callState.activeCalls.get(CallSid);
-  if (callData) {
-    callData.status = CallStatus;
-    callData.duration = CallDuration;
-    callData.answeredBy = AnsweredBy;
-    callData.updatedAt = new Date().toISOString();
-
-    // If call completed, move to history
-    if (['completed', 'busy', 'no-answer', 'canceled', 'failed'].includes(CallStatus)) {
-      callData.endedAt = new Date().toISOString();
-
-      // Update Google Sheet if we have row info
-      if (callData.rowIndex) {
-        const status = CallStatus === 'completed' ? 'Completed' : 'No Answer';
-        await googleSheets.updateCandidateStatus(callData.rowIndex, {
-          status,
-          lastCalled: callData.endedAt,
-          attempts: (callData.attempts || 0) + 1,
-        });
-      }
-    }
-  }
+  // Update call queue with status
+  await callQueue.handleCallStatus(CallSid, CallStatus, {
+    duration: CallDuration,
+    answeredBy: AnsweredBy,
+  });
 
   res.sendStatus(200);
 }
@@ -184,7 +200,8 @@ async function twilioStatusWebhook(req, res) {
 async function twilioAmdWebhook(req, res) {
   const { CallSid, AnsweredBy, MachineDetectionDuration } = req.body;
 
-  const callData = callState.activeCalls.get(CallSid);
+  // Update call with AMD result
+  const callData = callQueue.getCall(CallSid);
   if (callData) {
     callData.answeredBy = AnsweredBy;
     callData.machineDetectionDuration = MachineDetectionDuration;
@@ -193,66 +210,14 @@ async function twilioAmdWebhook(req, res) {
   res.sendStatus(200);
 }
 
-/**
- * Process the call queue (runs in background)
- */
-async function processQueue() {
-  while (callState.isRunning && callState.queue.length > 0) {
-    // Check calling hours
-    const hour = new Date().getHours();
-    if (hour < config.compliance.callingHoursStart || hour >= config.compliance.callingHoursEnd) {
-      console.log('Outside calling hours, pausing queue');
-      await sleep(60000); // Wait 1 minute and check again
-      continue;
-    }
-
-    // Get next candidate
-    const candidate = callState.queue.shift();
-    if (!candidate || !candidate.phone) continue;
-
-    try {
-      console.log(`Calling ${candidate.name} at ${candidate.phone}`);
-
-      // This would need the actual server URL in production
-      const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
-      const webhookUrl = `${baseUrl}/api/webhooks/twilio/voice`;
-      const statusCallbackUrl = `${baseUrl}/api/webhooks/twilio/status`;
-
-      const call = await twilioService.makeCall(candidate.phone, webhookUrl, {
-        statusCallbackUrl,
-        detectVoicemail: true,
-      });
-
-      callState.activeCalls.set(call.callSid, {
-        ...call,
-        candidateName: candidate.name,
-        rowIndex: candidate.rowIndex,
-        attempts: candidate.attempts,
-        startedAt: new Date().toISOString(),
-      });
-
-      // Wait before next call
-      await sleep(5000);
-    } catch (error) {
-      console.error(`Error calling ${candidate.name}:`, error.message);
-    }
-  }
-
-  if (callState.queue.length === 0) {
-    callState.isRunning = false;
-    console.log('Queue processing complete');
-  }
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 module.exports = {
   startQueue,
   stopQueue,
+  pauseQueue,
+  resumeQueue,
   getQueueStatus,
   getCallDetails,
+  getCompletedCalls,
   makeTestCall,
   twilioVoiceWebhook,
   twilioStatusWebhook,
