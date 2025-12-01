@@ -1,32 +1,31 @@
 const express = require('express');
 const router = express.Router();
+const sheetsController = require('../controllers/sheetsController');
+const callsController = require('../controllers/callsController');
 
 // Health check
 router.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Call routes (to be implemented)
-router.post('/calls/start', (req, res) => {
-  res.json({ message: 'Start calling queue - not implemented yet' });
-});
+// Call routes
+router.post('/calls/start', callsController.startQueue);
+router.post('/calls/stop', callsController.stopQueue);
+router.get('/calls/status', callsController.getQueueStatus);
+router.get('/calls/:id', callsController.getCallDetails);
+router.post('/calls/test', callsController.makeTestCall);
 
-router.post('/calls/stop', (req, res) => {
-  res.json({ message: 'Stop calling queue - not implemented yet' });
-});
+// Twilio webhooks
+router.post('/webhooks/twilio/voice', callsController.twilioVoiceWebhook);
+router.post('/webhooks/twilio/status', callsController.twilioStatusWebhook);
+router.post('/webhooks/twilio/amd', callsController.twilioAmdWebhook);
 
-router.get('/calls/status', (req, res) => {
-  res.json({ message: 'Get queue status - not implemented yet' });
-});
-
-router.get('/calls/:id', (req, res) => {
-  res.json({ message: `Get call ${req.params.id} - not implemented yet` });
-});
-
-// Sheets routes (to be implemented)
-router.post('/sheets/sync', (req, res) => {
-  res.json({ message: 'Sync with Google Sheet - not implemented yet' });
-});
+// Sheets routes
+router.post('/sheets/sync', sheetsController.syncSheet);
+router.get('/sheets/candidates', sheetsController.getCandidates);
+router.get('/sheets/candidates/pending', sheetsController.getPendingCandidates);
+router.put('/sheets/candidates/:rowIndex', sheetsController.updateCandidate);
+router.post('/sheets/candidates/:rowIndex/dnc', sheetsController.markDoNotCall);
 
 // Dashboard routes (to be implemented)
 router.get('/dashboard/stats', (req, res) => {
